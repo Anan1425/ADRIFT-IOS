@@ -61,36 +61,55 @@ jobs:
             # Find the renios directory and move it to the right place
             if [ -d "renios_temp/renios" ]; then
               mv renios_temp/renios renios
-            else
-              # The zip might extract directly
+            elif [ -f "renios_temp/hash.txt" ] || [ -d "renios_temp/buildlib" ]; then
+              # The zip extracts directly into renios structure
               mv renios_temp renios
+            else
+              # Try to find renios directory recursively
+              found=$(find renios_temp -name "hash.txt" -path "*renios*" | head -1)
+              if [ -n "$found" ]; then
+                mv "$(dirname "$found")" renios
+              else
+                echo "WARNING: Could not find renios directory in zip"
+                ls -la renios_temp/
+              fi
             fi
             rm -rf renios_temp renios.zip
             echo "renios installed:"
-            ls -la renios/
+            ls -la renios/ 2>/dev/null || echo "renios directory not found"
           else
             echo "WARNING: Could not download renios from direct URLs"
             echo "Will try Ren'Py updater mechanism"
           fi
 
+          # Verify renios is properly installed
+          if [ -f "renios/hash.txt" ]; then
+            echo "[OK] renios verified (hash.txt found)"
+          else
+            echo "[WARNING] renios hash.txt not found, ios_create may fail"
+            find renios -maxdepth 2 -type f 2>/dev/null | head -20 || true
+          fi
+
       - name: Setup project
         run: |
-          mkdir -p renpy-sdk/projects
-          cp -r game "renpy-sdk/projects/${APP_NAME}"
+          # Create project directory first, then copy game into it
+          mkdir -p "renpy-sdk/projects/${APP_NAME}"
+          cp -r game "renpy-sdk/projects/${APP_NAME}/"
 
-          # Create options.rpy if not exists
+          echo "=== Repository root ==="
+          ls -la
+          echo "=== Project directory ==="
+          ls -la "renpy-sdk/projects/${APP_NAME}/"
+          echo "=== Game directory ==="
+          ls -la "renpy-sdk/projects/${APP_NAME}/game/"
+
+          # Verify options.rpy exists (should be from repo)
           if [ ! -f "renpy-sdk/projects/${APP_NAME}/game/options.rpy" ]; then
-            cat > "renpy-sdk/projects/${APP_NAME}/game/options.rpy" << 'EOF'
-          init python:
-              config.name = "ADRIFT"
-              config.version = "1.0"
-              build.name = "adrift"
-              build.executable_name = "adrift"
-          EOF
+            echo "WARNING: options.rpy not found, creating minimal version"
+            printf 'init python:\n    config.name = "ADRIFT"\n    config.version = "1.0"\n    build.name = "adrift"\n    build.executable_name = "adrift"\n' > "renpy-sdk/projects/${APP_NAME}/game/options.rpy"
           fi
 
           echo "Project setup complete"
-          ls -la "renpy-sdk/projects/${APP_NAME}/game/"
 
       - name: Create Xcode project (ios_create)
         run: |
