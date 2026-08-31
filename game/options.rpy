@@ -31,21 +31,20 @@ init python:
     # 主菜单音乐
     config.main_menu_music = "audio/bgm_5.mp3"
 
+    # 构建分类规则
+    build.classify('**~', None)
+    build.classify('**.bak', None)
+    build.classify('**/.**', None)
+    build.classify('**/#**', None)
+    build.classify('**/thumbs.db', None)
+    build.classify('**.rpy', None)
+    build.classify('**.save', None)
 
-# 构建分类规则
-build.classify('**~', None)
-build.classify('**.bak', None)
-build.classify('**/.**', None)
-build.classify('**/#**', None)
-build.classify('**/thumbs.db', None)
-build.classify('**.rpy', None)
-build.classify('**.save', None)
+    build.classify('game/**.png', 'archive')
+    build.classify('game/**.jpg', 'archive')
+    build.classify('game/**.rpyc', 'archive')
+    build.classify('game/**.mp3', 'archive')
+    build.classify('game/**.ttf', 'archive')
 
-build.classify('game/**.png', 'archive')
-build.classify('game/**.jpg', 'archive')
-build.classify('game/**.rpyc', 'archive')
-build.classify('game/**.mp3', 'archive')
-build.classify('game/**.ttf', 'archive')
-
-build.documentation('*.html')
-build.documentation('*.txt')
+    build.documentation('*.html')
+    build.documentation('*.txt')
