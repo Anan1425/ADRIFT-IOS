@@ -44,55 +44,20 @@ jobs:
 
       - name: Download renios (iOS support package)
         run: |
-          cd renpy-sdk
-          # Try multiple possible URLs for renios
-          RENIOS_URL=""
-          for url in \
-            "http://update.renpy.org/${RENPY_SHORT}/renios-${RENPY_VERSION}.zip" \
-            "https://www.renpy.org/dl/${RENPY_VERSION}/renios.zip" \
-            "https://www.renpy.org/dl/${RENPY_VERSION}/renios-${RENPY_VERSION}.zip" \
-            "http://update.renpy.org/${RENPY_SHORT}/renios.zip"; do
-            echo "Trying: $url"
-            if curl -fL -o renios.zip "$url" 2>/dev/null; then
-              RENIOS_URL="$url"
-              break
-            fi
-          done
+          echo "=== Downloading and extracting renios using RPU extractor ==="
+          python3 scripts/extract_rpu.py "${RENPY_VERSION}" renios renpy-sdk/
 
-          if [ -n "$RENIOS_URL" ]; then
-            echo "Downloaded renios from: $RENIOS_URL"
-            unzip -q renios.zip -d renios_temp
-            # Find the renios directory and move it to the right place
-            if [ -d "renios_temp/renios" ]; then
-              mv renios_temp/renios renios
-            elif [ -f "renios_temp/hash.txt" ] || [ -d "renios_temp/buildlib" ]; then
-              # The zip extracts directly into renios structure
-              mv renios_temp renios
-            else
-              # Try to find renios directory recursively
-              found=$(find renios_temp -name "hash.txt" -path "*renios*" | head -1)
-              if [ -n "$found" ]; then
-                mv "$(dirname "$found")" renios
-              else
-                echo "WARNING: Could not find renios directory in zip"
-                ls -la renios_temp/
-              fi
-            fi
-            rm -rf renios_temp renios.zip
-            echo "renios installed:"
-            ls -la renios/ 2>/dev/null || echo "renios directory not found"
-          else
-            echo "WARNING: Could not download renios from direct URLs"
-            echo "Will try Ren'Py updater mechanism"
+          echo "=== Verify renios installation ==="
+          if [ ! -f "renpy-sdk/renios/hash.txt" ]; then
+            echo "ERROR: renios/hash.txt not found"
+            ls -la renpy-sdk/renios/ 2>/dev/null || echo "renios directory not found"
+            exit 1
           fi
-
-          # Verify renios is properly installed
-          if [ -f "renios/hash.txt" ]; then
-            echo "[OK] renios verified (hash.txt found)"
-          else
-            echo "[WARNING] renios hash.txt not found, ios_create may fail"
-            find renios -maxdepth 2 -type f 2>/dev/null | head -20 || true
-          fi
+          echo "[OK] renios hash.txt:"
+          cat renpy-sdk/renios/hash.txt
+          echo ""
+          echo "renios contents:"
+          ls -la renpy-sdk/renios/
 
       - name: Setup project
         run: |
@@ -131,43 +96,94 @@ jobs:
 
       - name: Create Xcode project (ios_create)
         run: |
+          set -o pipefail
           cd renpy-sdk
           mkdir -p ../xcode-output
 
+          echo "=== Running ios_create ==="
           # Use the ios_create command to generate Xcode project
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy RENPY_NO_DISPLAY=1 \
           ./renpy.sh launcher ios_create \
             "projects/${APP_NAME}" \
             "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_create.log
 
+          CREATE_EXIT=${PIPESTATUS[0]}
+          echo "ios_create exit code: $CREATE_EXIT"
+
           echo "---"
-          echo "Xcode project contents:"
-          ls -la "../xcode-output/${APP_NAME}/" 2>/dev/null || echo "Directory not found"
-          find "../xcode-output" -name "*.xcodeproj" -type d 2>/dev/null || true
+          echo "=== xcode-output contents ==="
+          find ../xcode-output -maxdepth 3 -type d 2>/dev/null || true
+          echo "=== Looking for .xcodeproj ==="
+          find ../xcode-output -name "*.xcodeproj" -type d 2>/dev/null || true
+          find . -name "*.xcodeproj" -type d 2>/dev/null | head -5 || true
+
+          # Verify output was created
+          if [ $CREATE_EXIT -ne 0 ]; then
+            echo "ERROR: ios_create failed with exit code $CREATE_EXIT"
+            echo "=== Full ios_create log ==="
+            cat ../ios_create.log || true
+            exit 1
+          fi
+
+          XCODEPROJ=$(find ../xcode-output -name "*.xcodeproj" -type d | head -1)
+          if [ -z "$XCODEPROJ" ]; then
+            echo "ERROR: ios_create did not produce an .xcodeproj"
+            echo "=== Full ios_create log ==="
+            cat ../ios_create.log || true
+            echo "=== xcode-output tree ==="
+            find ../xcode-output 2>/dev/null | head -50 || true
+            exit 1
+          fi
+          echo "[OK] Xcode project created: $XCODEPROJ"
 
       - name: Update Xcode project with game files (ios_populate)
         run: |
+          set -o pipefail
           cd renpy-sdk
 
+          echo "=== Running ios_populate ==="
           SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy RENPY_NO_DISPLAY=1 \
           ./renpy.sh launcher ios_populate \
             "projects/${APP_NAME}" \
             "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_populate.log
+
+          POPULATE_EXIT=${PIPESTATUS[0]}
+          echo "ios_populate exit code: $POPULATE_EXIT"
 
           echo "---"
           echo "After populate:"
           find "../xcode-output/${APP_NAME}" -name "*.xcodeproj" -type d 2>/dev/null
           ls "../xcode-output/${APP_NAME}/base/" 2>/dev/null | head -20
 
+          if [ $POPULATE_EXIT -ne 0 ]; then
+            echo "ERROR: ios_populate failed with exit code $POPULATE_EXIT"
+            echo "=== Full ios_populate log ==="
+            cat ../ios_populate.log || true
+            exit 1
+          fi
+          echo "[OK] ios_populate completed"
+
       - name: Locate Xcode project
         id: locate_xcode
         run: |
-          XCODEPROJ=$(find xcode-output -name "*.xcodeproj" -type d | head -1)
+          # Search broadly for the xcodeproj
+          XCODEPROJ=""
+          for search_dir in "xcode-output" "." "renpy-sdk" "renpy-sdk/xcode-output"; do
+            XCODEPROJ=$(find "$search_dir" -name "*.xcodeproj" -type d 2>/dev/null | head -1)
+            if [ -n "$XCODEPROJ" ]; then
+              break
+            fi
+          done
+
           if [ -z "$XCODEPROJ" ]; then
-            echo "ERROR: Could not find Xcode project"
-            find . -name "*.xcodeproj" 2>/dev/null
+            echo "ERROR: Could not find Xcode project anywhere"
+            echo "=== Searching entire workspace ==="
+            find . -name "*.xcodeproj" -type d 2>/dev/null || true
+            echo "=== xcode-output tree ==="
+            find xcode-output 2>/dev/null | head -50 || true
             exit 1
           fi
+
           echo "xcodeproj=$XCODEPROJ" >> $GITHUB_OUTPUT
           echo "Found: $XCODEPROJ"
           PROJECT_DIR="$(cd "$(dirname "$XCODEPROJ")" && pwd)"
