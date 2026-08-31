@@ -10,6 +10,10 @@ env:
   RENPY_SHORT: "8.4"
   APP_NAME: "ADRIFT"
   BUNDLE_ID: "com.adrift.game"
+  # Headless display driver for CI (no physical monitor)
+  SDL_VIDEODRIVER: "dummy"
+  SDL_AUDIODRIVER: "dummy"
+  RENPY_NO_DISPLAY: "1"
 
 jobs:
   build-ios:
@@ -111,12 +115,27 @@ jobs:
 
           echo "Project setup complete"
 
+      - name: Pre-compile game scripts (lint check)
+        run: |
+          cd renpy-sdk
+          # Compile scripts with dummy display driver (headless CI)
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy RENPY_NO_DISPLAY=1 \
+          ./renpy.sh "projects/${APP_NAME}" compile 2>&1 | tee ../compile.log || true
+
+          echo "=== Compile log (last 30 lines) ==="
+          tail -30 ../compile.log || true
+
+          # Verify .rpyc files were created
+          echo "=== Compiled scripts ==="
+          find "projects/${APP_NAME}/game" -name "*.rpyc" -type f 2>/dev/null | head -20 || true
+
       - name: Create Xcode project (ios_create)
         run: |
           cd renpy-sdk
           mkdir -p ../xcode-output
 
           # Use the ios_create command to generate Xcode project
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy RENPY_NO_DISPLAY=1 \
           ./renpy.sh launcher ios_create \
             "projects/${APP_NAME}" \
             "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_create.log
@@ -130,6 +149,7 @@ jobs:
         run: |
           cd renpy-sdk
 
+          SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy RENPY_NO_DISPLAY=1 \
           ./renpy.sh launcher ios_populate \
             "projects/${APP_NAME}" \
             "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_populate.log
