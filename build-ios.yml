@@ -1,0 +1,303 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  RENPY_VERSION: "8.4.1"
+  RENPY_SHORT: "8.4"
+  APP_NAME: "ADRIFT"
+  BUNDLE_ID: "com.adrift.game"
+
+jobs:
+  build-ios:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Download Ren'Py SDK
+        run: |
+          curl -fL -o renpy-sdk.tar.bz2 "https://www.renpy.org/dl/${RENPY_VERSION}/renpy-${RENPY_VERSION}-sdk.tar.bz2" || \
+          curl -fL -o renpy-sdk.tar.bz2 "https://www.renpy.org/dl/${RENPY_VERSION}/renpy-${RENPY_VERSION}-sdk.zip"
+          if [ -f renpy-sdk.tar.bz2 ]; then
+            tar -xjf renpy-sdk.tar.bz2
+          else
+            unzip -q renpy-sdk.zip
+          fi
+          mv "renpy-${RENPY_VERSION}-sdk" renpy-sdk
+          echo "Ren'Py SDK ready"
+          ls renpy-sdk/
+
+      - name: Download renios (iOS support package)
+        run: |
+          cd renpy-sdk
+          # Try multiple possible URLs for renios
+          RENIOS_URL=""
+          for url in \
+            "http://update.renpy.org/${RENPY_SHORT}/renios-${RENPY_VERSION}.zip" \
+            "https://www.renpy.org/dl/${RENPY_VERSION}/renios.zip" \
+            "https://www.renpy.org/dl/${RENPY_VERSION}/renios-${RENPY_VERSION}.zip" \
+            "http://update.renpy.org/${RENPY_SHORT}/renios.zip"; do
+            echo "Trying: $url"
+            if curl -fL -o renios.zip "$url" 2>/dev/null; then
+              RENIOS_URL="$url"
+              break
+            fi
+          done
+
+          if [ -n "$RENIOS_URL" ]; then
+            echo "Downloaded renios from: $RENIOS_URL"
+            unzip -q renios.zip -d renios_temp
+            # Find the renios directory and move it to the right place
+            if [ -d "renios_temp/renios" ]; then
+              mv renios_temp/renios renios
+            else
+              # The zip might extract directly
+              mv renios_temp renios
+            fi
+            rm -rf renios_temp renios.zip
+            echo "renios installed:"
+            ls -la renios/
+          else
+            echo "WARNING: Could not download renios from direct URLs"
+            echo "Will try Ren'Py updater mechanism"
+          fi
+
+      - name: Setup project
+        run: |
+          mkdir -p renpy-sdk/projects
+          cp -r game "renpy-sdk/projects/${APP_NAME}"
+
+          # Create options.rpy if not exists
+          if [ ! -f "renpy-sdk/projects/${APP_NAME}/game/options.rpy" ]; then
+            cat > "renpy-sdk/projects/${APP_NAME}/game/options.rpy" << 'EOF'
+          init python:
+              config.name = "ADRIFT"
+              config.version = "1.0"
+              build.name = "adrift"
+              build.executable_name = "adrift"
+          EOF
+          fi
+
+          echo "Project setup complete"
+          ls -la "renpy-sdk/projects/${APP_NAME}/game/"
+
+      - name: Create Xcode project (ios_create)
+        run: |
+          cd renpy-sdk
+          mkdir -p ../xcode-output
+
+          # Use the ios_create command to generate Xcode project
+          ./renpy.sh launcher ios_create \
+            "projects/${APP_NAME}" \
+            "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_create.log
+
+          echo "---"
+          echo "Xcode project contents:"
+          ls -la "../xcode-output/${APP_NAME}/" 2>/dev/null || echo "Directory not found"
+          find "../xcode-output" -name "*.xcodeproj" -type d 2>/dev/null || true
+
+      - name: Update Xcode project with game files (ios_populate)
+        run: |
+          cd renpy-sdk
+
+          ./renpy.sh launcher ios_populate \
+            "projects/${APP_NAME}" \
+            "../xcode-output/${APP_NAME}" 2>&1 | tee ../ios_populate.log
+
+          echo "---"
+          echo "After populate:"
+          find "../xcode-output/${APP_NAME}" -name "*.xcodeproj" -type d 2>/dev/null
+          ls "../xcode-output/${APP_NAME}/base/" 2>/dev/null | head -20
+
+      - name: Locate Xcode project
+        id: locate_xcode
+        run: |
+          XCODEPROJ=$(find xcode-output -name "*.xcodeproj" -type d | head -1)
+          if [ -z "$XCODEPROJ" ]; then
+            echo "ERROR: Could not find Xcode project"
+            find . -name "*.xcodeproj" 2>/dev/null
+            exit 1
+          fi
+          echo "xcodeproj=$XCODEPROJ" >> $GITHUB_OUTPUT
+          echo "Found: $XCODEPROJ"
+          PROJECT_DIR="$(cd "$(dirname "$XCODEPROJ")" && pwd)"
+          echo "project_dir=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "Project dir: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Configure Info.plist
+        run: |
+          PROJECT_DIR="${{ steps.locate_xcode.outputs.project_dir }}"
+          INFO_PLIST=$(find "$PROJECT_DIR" -name "Info.plist" -not -path "*/build/*" | head -1)
+
+          if [ -z "$INFO_PLIST" ] || [ ! -f "$INFO_PLIST" ]; then
+            echo "ERROR: Info.plist not found"
+            find "$PROJECT_DIR" -name "Info.plist" 2>/dev/null
+            exit 1
+          fi
+
+          echo "Configuring: $INFO_PLIST"
+
+          # Landscape only
+          /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" "$INFO_PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" "$INFO_PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft" "$INFO_PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight" "$INFO_PLIST"
+
+          # Keep screen on
+          /usr/libexec/PlistBuddy -c "Delete :UIIdleTimerDisabled" "$INFO_PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIIdleTimerDisabled bool true" "$INFO_PLIST"
+
+          # Full screen only
+          /usr/libexec/PlistBuddy -c "Delete :UIRequiresFullScreen" "$INFO_PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIRequiresFullScreen bool true" "$INFO_PLIST"
+
+          # Hide status bar
+          /usr/libexec/PlistBuddy -c "Delete :UIStatusBarHidden" "$INFO_PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIStatusBarHidden bool true" "$INFO_PLIST"
+
+          # Bundle ID
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$INFO_PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string ${BUNDLE_ID}" "$INFO_PLIST"
+
+          echo "Info.plist configured:"
+          cat "$INFO_PLIST"
+
+      - name: Generate app icon
+        run: |
+          PROJECT_DIR="${{ steps.locate_xcode.outputs.project_dir }}"
+          ASSETS_DIR=$(find "$PROJECT_DIR" -name "*.xcassets" -type d -not -path "*/build/*" | head -1)
+
+          if [ -z "$ASSETS_DIR" ]; then
+            ASSETS_DIR="$PROJECT_DIR/$APP_NAME/Media.xcassets"
+            mkdir -p "$ASSETS_DIR"
+          fi
+
+          APPICON_DIR="$ASSETS_DIR/AppIcon.appiconset"
+          mkdir -p "$APPICON_DIR"
+
+          # Generate icon using Python
+          python3 << 'PYEOF'
+          import struct, zlib, os
+
+          def create_png(width, height, color, text=None):
+              """Create a simple PNG file."""
+              # Simple solid color PNG
+              raw = b''
+              for y in range(height):
+                  raw += b'\x00'  # filter byte
+                  for x in range(width):
+                      raw += bytes(color)
+
+              def chunk(ctype, data):
+                  c = ctype + data
+                  return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+
+              sig = b'\x89PNG\r\n\x1a\n'
+              ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+              idat = zlib.compress(raw)
+              return sig + chunk(b'IHDR', ihdr) + chunk(b'IDAT', idat) + chunk(b'IEND', b'')
+
+          icon = create_png(1024, 1024, (26, 26, 46))
+          outdir = os.environ.get('APPICON_DIR', '.')
+          with open(os.path.join(outdir, 'icon-1024.png'), 'wb') as f:
+              f.write(icon)
+          print("Icon generated")
+          PYEOF
+
+          # Create Contents.json
+          cat > "$APPICON_DIR/Contents.json" << 'EOF'
+          {
+            "images" : [
+              { "idiom" : "universal", "platform" : "ios", "size" : "1024x1024", "filename" : "icon-1024.png" }
+            ],
+            "info" : { "version" : 1, "author" : "xcode" }
+          }
+          EOF
+
+          echo "App icon ready at: $APPICON_DIR"
+          ls -la "$APPICON_DIR"
+
+      - name: Build iOS app
+        run: |
+          PROJECT_DIR="${{ steps.locate_xcode.outputs.project_dir }}"
+          XCODEPROJ="${{ steps.locate_xcode.outputs.xcodeproj }}"
+          SCHEME=$(basename "$XCODEPROJ" .xcodeproj)
+
+          cd "$PROJECT_DIR"
+
+          echo "Building scheme: $SCHEME"
+          echo "Project dir: $(pwd)"
+          ls -la
+
+          # Build without code signing
+          xcodebuild \
+            -project "$SCHEME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tail -80
+
+          # Find built app
+          APP_PATH=$(find build -name "*.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found in build output"
+            find build -name "*.app" 2>/dev/null || true
+            ls -la build/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "Built: $APP_PATH"
+          ls -la "$APP_PATH"
+
+      - name: Package IPA
+        run: |
+          PROJECT_DIR="${{ steps.locate_xcode.outputs.project_dir }}"
+          APP_PATH=$(find "$PROJECT_DIR/build" -name "*.app" -type d | head -1)
+
+          cd "$PROJECT_DIR"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -qr "${APP_NAME}.ipa" Payload/
+          rm -rf Payload
+
+          IPA_PATH="$(pwd)/${APP_NAME}.ipa"
+          echo "IPA created: $IPA_PATH"
+          ls -lh "$IPA_PATH"
+
+          # Copy to workspace root for easy access
+          cp "$IPA_PATH" "${GITHUB_WORKSPACE}/${APP_NAME}.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ env.APP_NAME }}-iOS-IPA"
+          path: "${{ env.APP_NAME }}.ipa"
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            *.log
+            **/build/Logs/**
+            xcode-output/**/*.log
+          retention-days: 7
